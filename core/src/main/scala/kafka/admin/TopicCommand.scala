@@ -95,15 +95,20 @@ object TopicCommand extends Logging {
     if (Topic.hasCollisionChars(topic))
       println("WARNING: Due to limitations in metric names, topics with a period ('.') or underscore ('_') could collide. To avoid issues it is best to use either, but not both.")
     try {
-      if (opts.options.has(opts.replicaAssignmentOpt)) {
+      if (opts.options.has(opts.replicaAssignmentOpt)) {//note: 指定 replica 的分配,直接向 zk 更新即可
+        // 在创建 topic 时，可以通过以下形式直接指定 topic 的 replica
+        // ./bin/kafka-topics.sh --create --topic test --zookeeper XXXX --replica-assignment 1:2,3:4,5:6
+        // 该 topic 有三个 partition，其中，partition 0 的 replica 分布在1和2上，partition 1 的 replica 分布在3和4上，partition 3 的 replica 分布在4和5上。
         val assignment = parseReplicaAssignment(opts.options.valueOf(opts.replicaAssignmentOpt))
         AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkUtils, topic, assignment, configs, update = false)
-      } else {
+      } else {//note: 未指定 replica 的分配,调用自动分配算法进行分配
         CommandLineUtils.checkRequiredArgs(opts.parser, opts.options, opts.partitionsOpt, opts.replicationFactorOpt)
         val partitions = opts.options.valueOf(opts.partitionsOpt).intValue
         val replicas = opts.options.valueOf(opts.replicationFactorOpt).intValue
         val rackAwareMode = if (opts.options.has(opts.disableRackAware)) RackAwareMode.Disabled
                             else RackAwareMode.Enforced
+        // 这个方法首先会检测当前的 Kafka 集群是否机架感知，如果有的话先获取 Broker 的机架信息，
+        // 接着再使用 Replica 自动分配算法来分配 Partition 的 replica，最后就跟指定 replica 方式一样，将 replicas 的结果更新到 zk 中。
         AdminUtils.createTopic(zkUtils, topic, partitions, replicas, configs, rackAwareMode)
       }
       println("Created topic \"%s\".".format(topic))

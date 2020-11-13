@@ -210,9 +210,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         Assignment assignment = ConsumerProtocol.deserializeAssignment(assignmentBuffer);
 
         // set the flag to refresh last committed offsets
+        // 设置是否需要拉取 last committed offsets 为 true
         subscriptions.needRefreshCommits();
 
         // update partition assignment
+        //  更新订阅的 tp list
         subscriptions.assignFromSubscribed(assignment.partitions());
 
         // check if the assignment contains some topics that were not in the original
@@ -238,6 +240,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         // update the metadata and enforce a refresh to make sure the fetcher can start
         // fetching data in the next iteration
+        // 更新 metadata,确保在下一次循环中可以拉取
         this.metadata.setTopics(subscriptions.groupSubscription());
         client.ensureFreshMetadata();
 
@@ -268,26 +271,36 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      *
      * @param now current time in milliseconds
      */
+    // // note: 它确保了这个 group 的 coordinator 是已知的,并且这个 consumer 是已经加入到了 group 中,也用于 offset 周期性的 commit
     public void poll(long now) {
-        invokeCompletedOffsetCommitCallbacks();
+        invokeCompletedOffsetCommitCallbacks();// 用于测试
 
+        // Step1 通过 subscribe() 方法订阅 topic,并且 coordinator 未知,初始化 Consumer Coordinator
         if (subscriptions.partitionsAutoAssigned() && coordinatorUnknown()) {
+            // 获取 GroupCoordinator 地址,并且建立连接
             ensureCoordinatorReady();
             now = time.milliseconds();
         }
 
+        // Step2 判断是否需要重新加入 group,如果订阅的 partition 变化或则分配的 partition 变化时,需要 rejoin
         if (needRejoin()) {
             // due to a race condition between the initial metadata fetch and the initial rebalance,
             // we need to ensure that the metadata is fresh before joining initially. This ensures
             // that we have matched the pattern against the cluster's topics at least once before joining.
+            // rejoin group 之前先刷新一下 metadata（对于 AUTO_PATTERN 而言）
             if (subscriptions.hasPatternSubscription())
                 client.ensureFreshMetadata();
 
+            // 确保 group 是 active; 加入 group; 分配订阅的 partition
+            // 向 GroupCoordinator 发送 join-group、sync-group 请求，获取 assign 的 tp list。
+            // ensureActiveGroup 方法的调用过程：ensureActiveGroup() –> ensureCoordinatorReady() –> startHeartbeatThreadIfNeeded() –> joinGroupIfNeeded()；
             ensureActiveGroup();
             now = time.milliseconds();
         }
 
+        // Step3 检查心跳线程运行是否正常,如果心跳线程失败,则抛出异常,反之更新 poll 调用的时间
         pollHeartbeat(now);
+        // Step4 自动 commit 时,当定时达到时,进行自动 commit
         maybeAutoCommitOffsetsAsync(now);
     }
 

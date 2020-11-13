@@ -287,23 +287,27 @@ public class Selector implements Selectable {
     public void poll(long timeout) throws IOException {
         if (timeout < 0)
             throw new IllegalArgumentException("timeout should be >= 0");
-
+        //note: Step1 清除相关记录
         clear();
 
         if (hasStagedReceives() || !immediatelyConnectedKeys.isEmpty())
             timeout = 0;
 
         /* check ready keys */
+        //note: Step2 获取就绪事件的数
         long startSelect = time.nanoseconds();
         int readyKeys = select(timeout);
         long endSelect = time.nanoseconds();
         this.sensors.selectTime.record(endSelect - startSelect, time.milliseconds());
 
+        //note: Step3 处理 io 操作
         if (readyKeys > 0 || !immediatelyConnectedKeys.isEmpty()) {
+            // 处理已经就绪的事件，进行相应的 IO 操作
             pollSelectionKeys(this.nioSelector.selectedKeys(), false, endSelect);
+            // 处理新建立的那些连接，添加缓存及传输层（Kafka 又封装了一次）的握手与认证。
             pollSelectionKeys(immediatelyConnectedKeys, true, endSelect);
         }
-
+        //note: Step4 将处理得到的 stagedReceives 添加到 completedReceives 中
         addToCompletedReceives();
 
         long endIo = time.nanoseconds();
@@ -311,6 +315,8 @@ public class Selector implements Selectable {
 
         // we use the time at the end of select to ensure that we don't close any connections that
         // have just been processed in pollSelectionKeys
+        //note: 每次 poll 之后会调用一次
+        //TODO: 连接虽然关闭了,但是 Client 端的缓存依然存在
         maybeCloseOldestConnection(endSelect);
     }
 
@@ -331,6 +337,7 @@ public class Selector implements Selectable {
             try {
 
                 /* complete any connections that have finished their handshake (either normally or immediately) */
+                // 处理一些刚建立 tcp 连接的 channel
                 if (isImmediatelyConnected || key.isConnectable()) {
                     if (channel.finishConnect()) {
                         this.connected.add(channel.id());
@@ -346,14 +353,15 @@ public class Selector implements Selectable {
                 }
 
                 /* if channel is not ready finish prepare */
+                //note: 处理 tcp 连接还未完成的连接,进行传输层的握手及认证
                 if (channel.isConnected() && !channel.ready())
                     channel.prepare();
 
                 /* if channel is ready read from any connections that have readable data */
                 if (channel.ready() && key.isReadable() && !hasStagedReceive(channel)) {
                     NetworkReceive networkReceive;
-                    while ((networkReceive = channel.read()) != null)
-                        addToStagedReceives(channel, networkReceive);
+                    while ((networkReceive = channel.read()) != null)// 直到读取一个完整的 Receive,才添加到集合中
+                        addToStagedReceives(channel, networkReceive);// 读取数据
                 }
 
                 /* if channel is ready write to any sockets that have space in their buffer and for which we have data */
@@ -479,6 +487,8 @@ public class Selector implements Selectable {
      * @throws IllegalArgumentException
      * @throws IOException
      */
+    // 这个方法最坏情况下，会阻塞 ms 的时间，
+    // 如果在一次轮询，只要有一个 Channel 的事件就绪，它就会立马返回。
     private int select(long ms) throws IOException {
         if (ms < 0L)
             throw new IllegalArgumentException("timeout should be >= 0");

@@ -43,6 +43,9 @@ import java.util.Set;
  * is removed from the metadata refresh set after an update. Consumers disable topic expiry since they explicitly
  * manage topics while producers rely on topic expiry to limit the refresh set.
  */
+// 这个类被 client 线程和后台 sender 所共享,它只保存了所有 topic 的部分数据,当我们请求一个它上面没有的 topic meta 时,它会通过发送 metadata update 来更新 meta 信息,
+// 如果 topic meta 过期策略是允许的,那么任何 topic 过期的话都会被从集合中移除,
+// 但是 consumer 是不允许 topic 过期的因为它明确地知道它需要管理哪些 topic
 public final class Metadata {
 
     private static final Logger log = LoggerFactory.getLogger(Metadata.class);
@@ -50,19 +53,19 @@ public final class Metadata {
     public static final long TOPIC_EXPIRY_MS = 5 * 60 * 1000;
     private static final long TOPIC_EXPIRY_NEEDS_UPDATE = -1L;
 
-    private final long refreshBackoffMs;
-    private final long metadataExpireMs;
-    private int version;
-    private long lastRefreshMs;
-    private long lastSuccessfulRefreshMs;
-    private Cluster cluster;
-    private boolean needUpdate;
+    private final long refreshBackoffMs;// metadata 更新失败时,为避免频繁更新 meta,最小的间隔时间,默认 100ms
+    private final long metadataExpireMs;// metadata 的过期时间, 默认 60,000ms
+    private int version;// 每更新成功1次，version自增1,主要是用于判断 metadata 是否更新
+    private long lastRefreshMs;// 最近一次更新时的时间（包含更新失败的情况）
+    private long lastSuccessfulRefreshMs;// 最近一次成功更新的时间（如果每次都成功的话，与前面的值相等, 否则，lastSuccessulRefreshMs < lastRefreshMs)
+    private Cluster cluster;// 集群中一些 topic 的信息
+    private boolean needUpdate;// 是否需要更新metadata
     /* Topics with expiry time */
-    private final Map<String, Long> topics;
-    private final List<Listener> listeners;
-    private final ClusterResourceListeners clusterResourceListeners;
-    private boolean needMetadataForAllTopics;
-    private final boolean topicExpiryEnabled;
+    private final Map<String, Long> topics;// topic 与其过期时间的对应关系
+    private final List<Listener> listeners;// 事件监控者
+    private final ClusterResourceListeners clusterResourceListeners;//当接收到 metadata 更新时, ClusterResourceListeners的列表
+    private boolean needMetadataForAllTopics;// 是否强制更新所有的 metadata
+    private final boolean topicExpiryEnabled;// 默认为 true, Producer 会定时移除过期的 topic,consumer 则不会移除
 
     /**
      * Create a metadata instance with reasonable defaults
@@ -145,15 +148,16 @@ public final class Metadata {
     /**
      * Wait for metadata update until the current version is larger than the last version we know of
      */
+    // 更新 metadata 信息（根据当前 version 值来判断）
     public synchronized void awaitUpdate(final int lastVersion, final long maxWaitMs) throws InterruptedException {
         if (maxWaitMs < 0) {
             throw new IllegalArgumentException("Max time to wait for metadata updates should not be < 0 milli seconds");
         }
         long begin = System.currentTimeMillis();
         long remainingWaitMs = maxWaitMs;
-        while (this.version <= lastVersion) {
+        while (this.version <= lastVersion) {// 不断循环,直到 metadata 更新成功,version 自增
             if (remainingWaitMs != 0)
-                wait(remainingWaitMs);
+                wait(remainingWaitMs);// 阻塞线程，等待 metadata 的更新
             long elapsed = System.currentTimeMillis() - begin;
             if (elapsed >= maxWaitMs)
                 throw new TimeoutException("Failed to update metadata after " + maxWaitMs + " ms.");

@@ -94,7 +94,7 @@ public class Sender implements Runnable {
     public Sender(KafkaClient client,
                   Metadata metadata,
                   RecordAccumulator accumulator,
-                  boolean guaranteeMessageOrder,
+                  boolean guaranteeMessageOrder, // 消息顺序保证
                   int maxRequestSize,
                   short acks,
                   int retries,
@@ -161,12 +161,16 @@ public class Sender implements Runnable {
      * @param now
      *            The current POSIX time in milliseconds
      */
+    // Sender 线程每次循环具体执行的地方
     void run(long now) {
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
+        // Step1 获取那些已经可以发送的 RecordBatch 对应的 nodes
+        // 大小达到 batch.size 大小或时间达到 linger.ms
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
+        // Step2  如果有 topic-partition 的 leader 是未知的,就强制 metadata 更新
         if (!result.unknownLeaderTopics.isEmpty()) {
             // The set of topics with unknown leader contains topics with leader election pending as well as
             // topics which may have expired. Add the topic again to metadata to ensure it is included
@@ -188,10 +192,18 @@ public class Sender implements Runnable {
         }
 
         // create produce requests
+        // Step3  返回该 node 对应的所有可以发送的 RecordBatch 组成的 batches
+        // （key 是 node.id,这些 batches 将会在一个 request 中发送）
         Map<Integer, List<RecordBatch>> batches = this.accumulator.drain(cluster,
                                                                          result.readyNodes,
                                                                          this.maxRequestSize,
                                                                          now);
+        // 保证单 Partition 的顺序性，需要在 Producer 中配置 max.in.flight.requests.per.connection=1，
+        // 而其实现机制则是在 RecordAccumulator 中实现的。
+        // 如果这个 tp 被添加到 muted 集合中，那么它将不会被遍历，也就不会作为 request 一部分被发送出去，
+        // 这也就保证了 tp 如果还有未完成的 RecordBatch，那么其对应 deque 中其他 RecordBatch 即使达到条件也不会被发送，
+        // 就保证了 tp 在任何时刻只有一个 RecordBatch 在发送。
+        // guaranteeMessageOrder的会在KafkaProducer new sender对象设置这个值
         if (guaranteeMessageOrder) {
             // Mute all the partitions drained
             for (List<RecordBatch> batchList : batches.values()) {
@@ -216,12 +228,14 @@ public class Sender implements Runnable {
             log.trace("Nodes with data ready to send: {}", result.readyNodes);
             pollTimeout = 0;
         }
+        // step4 发送 RecordBatch
         sendProduceRequests(batches, now);
 
         // if some partitions are already ready to be sent, the select time would be 0;
         // otherwise if some partition already has some data accumulated but not ready yet,
         // the select time will be the time difference between now and its linger expiry time;
         // otherwise the select time will be the time difference between now and the metadata expiry time;
+        // Step5 关于 socket 的一些实际的读写操作
         this.client.poll(pollTimeout, now);
     }
 

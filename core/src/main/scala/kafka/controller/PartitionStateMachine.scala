@@ -195,6 +195,8 @@ class PartitionStateMachine(controller: KafkaController) extends Logging {
           partitionState(topicAndPartition) match {
             case NewPartition =>
               // initialize leader and isr path for new partition
+              // 这个方法是当 partition 对象的状态由 NewPartition 变为 OnlinePartition 时触发的，用来初始化该 partition 的 leader 和 isr。简单来说，
+              // 就是选取 Replicas 中的第一个 Replica 作为 leader，所有的 Replica 作为 isr
               initializeLeaderAndIsrForPartition(topicAndPartition)
             case OfflinePartition =>
               electLeaderForPartition(topic, partition, leaderSelector)
@@ -266,6 +268,7 @@ class PartitionStateMachine(controller: KafkaController) extends Logging {
    * OfflinePartition state.
    * @param topicAndPartition   The topic/partition whose leader and isr path is to be initialized
    */
+    //当 partition 状态由 NewPartition 变为 OnlinePartition 时,将触发这一方法,用来初始化 partition 的 leader 和 isr
   private def initializeLeaderAndIsrForPartition(topicAndPartition: TopicAndPartition) {
     val replicaAssignment = controllerContext.partitionReplicaAssignment(topicAndPartition)
     val liveAssignedReplicas = replicaAssignment.filter(r => controllerContext.liveBrokerIds.contains(r))
@@ -279,6 +282,7 @@ class PartitionStateMachine(controller: KafkaController) extends Logging {
       case _ =>
         debug("Live assigned replicas for partition %s are: [%s]".format(topicAndPartition, liveAssignedReplicas))
         // make the first replica in the list of assigned replicas, the leader
+        //replicas 中的第一个 replica 选做 leader
         val leader = liveAssignedReplicas.head
         val leaderIsrAndControllerEpoch = new LeaderIsrAndControllerEpoch(new LeaderAndIsr(leader, liveAssignedReplicas.toList),
           controller.epoch)
@@ -286,11 +290,13 @@ class PartitionStateMachine(controller: KafkaController) extends Logging {
         try {
           zkUtils.createPersistentPath(
             getTopicPartitionLeaderAndIsrPath(topicAndPartition.topic, topicAndPartition.partition),
+            //note: zk 上初始化节点信息
             zkUtils.leaderAndIsrZkData(leaderIsrAndControllerEpoch.leaderAndIsr, controller.epoch))
           // NOTE: the above write can fail only if the current controller lost its zk session and the new controller
           // took over and initialized this partition. This can happen if the current controller went into a long
           // GC pause
           controllerContext.partitionLeadershipInfo.put(topicAndPartition, leaderIsrAndControllerEpoch)
+          //向 live 的 Replica 发送  LeaderAndIsr 请求
           brokerRequestBatch.addLeaderAndIsrRequestForBrokers(liveAssignedReplicas, topicAndPartition.topic,
             topicAndPartition.partition, leaderIsrAndControllerEpoch, replicaAssignment)
         } catch {
@@ -408,6 +414,7 @@ class PartitionStateMachine(controller: KafkaController) extends Logging {
 
     protected def logName = "TopicChangeListener"
 
+    //note: 当 zk 上 topic 节点上有变更时,这个方法就会调用
     def doHandleChildChange(parentPath: String, children: Seq[String]) {
       inLock(controllerContext.controllerLock) {
         if (hasStarted.get) {
@@ -420,9 +427,11 @@ class PartitionStateMachine(controller: KafkaController) extends Logging {
             val deletedTopics = controllerContext.allTopics -- currentChildren
             controllerContext.allTopics = currentChildren
 
+            //note: 新创建 topic 对应的 partition 列表
             val addedPartitionReplicaAssignment = zkUtils.getReplicaAssignmentForTopics(newTopics.toSeq)
             controllerContext.partitionReplicaAssignment = controllerContext.partitionReplicaAssignment.filter(p =>
-              !deletedTopics.contains(p._1.topic))
+              !deletedTopics.contains(p._1.topic))//note: 把已经删除 partition 过滤掉
+            //note: 将新增的 tp-replicas 更新到缓存中
             controllerContext.partitionReplicaAssignment.++=(addedPartitionReplicaAssignment)
             info("New topics: [%s], deleted topics: [%s], new partition replica assignment [%s]".format(newTopics,
               deletedTopics, addedPartitionReplicaAssignment))
